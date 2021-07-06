@@ -1,12 +1,13 @@
 import abc
 import json
 import logging
+import os
 from typing import Any, Optional
 
 from redis import Redis
 
 
-class BaseStorage:
+class BaseStorage(abc.ABC):
     @abc.abstractmethod
     def save_state(self, state: dict) -> None:
         """Сохранить состояние в постоянное хранилище"""
@@ -15,6 +16,11 @@ class BaseStorage:
     @abc.abstractmethod
     def retrieve_state(self) -> dict:
         """Загрузить состояние локально из постоянного хранилища"""
+        pass
+
+    @abc.abstractmethod
+    def clean_up(self):
+        """Очистить состояние"""
         pass
 
 
@@ -42,6 +48,11 @@ class JsonFileStorage(BaseStorage):
 
         except FileNotFoundError:
             self.save_state({})
+            return {}
+
+    def clean_up(self):
+        if os.path.exists(self.file_path):
+            os.remove(self.file_path)
 
 
 class State:
@@ -70,6 +81,9 @@ class State:
     def get_state(self, key: str) -> Any:
         """Получить состояние по определённому ключу"""
         return self.state.get(key)
+
+    def clean_up(self):
+        self.storage.clean_up()
 
 
 class RedisStorage(BaseStorage):

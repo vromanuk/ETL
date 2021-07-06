@@ -9,7 +9,7 @@ from psycopg2 import OperationalError
 from psycopg2.extensions import connection as _connection
 from pydantic.dataclasses import dataclass
 
-from etl_state import RedisStorage
+from etl_state import State
 
 logging.basicConfig(format="[%(asctime)s: %(levelname)s] %(message)s", level=logging.INFO)
 
@@ -27,9 +27,9 @@ class ESItem:
 
 
 class ESLoader:
-    def __init__(self, url: str, storage: RedisStorage):
+    def __init__(self, url: str, state: State):
         self.url = url
-        self.storage = storage
+        self.state = state
 
     @staticmethod
     def _get_es_bulk_query(rows: list[ESItem], index_name: str = "movies") -> list[str]:
@@ -53,11 +53,11 @@ class ESLoader:
         """
         Отправка запроса в ES и разбор ошибок сохранения данных
         """
-        data = self.storage.retrieve_state()
+        data = self.state.retrieve_state()
         prepared_query = data.get("prepared_query")
         if not prepared_query:
             prepared_query = self._get_es_bulk_query(records, index_name)
-            self.storage.save_state({"prepared_query": prepared_query})
+            self.state.set_state({"prepared_query": prepared_query})
         str_query = "\n".join(prepared_query) + "\n"
 
         logging.info("loading movies to elastic")
@@ -71,15 +71,15 @@ class ESLoader:
             if error_message:
                 logging.error(error_message)
 
-        self.storage.clean_up()
+        self.state.clean_up()
 
 
 class PostgresLoader:
     BATCH_LIMIT = 100
 
-    def __init__(self, conn: _connection, storage: RedisStorage):
+    def __init__(self, conn: _connection, state: State):
         self.conn = conn
-        self.storage = storage
+        self.state = state
 
     @backoff.on_exception(backoff.expo, OperationalError, max_tries=3, jitter=backoff.random_jitter)
     def load_movies(self) -> dict:
@@ -87,7 +87,7 @@ class PostgresLoader:
         Основной метод для ETL.
         """
         with self.conn.cursor() as cur:
-            records = self.storage.retrieve_state()
+            records = self.state.retrieve_state()
             if records:
                 return records
             logging.info("loading cast")
@@ -150,7 +150,7 @@ class PostgresLoader:
             )
             records = cur.fetchall()
 
-        self.storage.save_state(records)
+        self.state.set_state("records", records)
         return records
 
     @staticmethod
