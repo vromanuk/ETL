@@ -12,7 +12,7 @@ BASE_ES_URL = os.getenv("ELASTIC_URL")
 redis = Redis(host=os.getenv("REDIS_HOST"), port=os.getenv("REDIS_PORT"))
 
 
-def etl_process(pg_conn: _connection, es_url: str, redis_client: Redis):
+def pipeline(pg_conn: _connection, es_url: str, redis_client: Redis):
     """Основной метод загрузки данных из Postgres в Elasticsearch"""
 
     redis_client = RedisStorage(redis_client)
@@ -20,9 +20,9 @@ def etl_process(pg_conn: _connection, es_url: str, redis_client: Redis):
     elastic_loader = ESLoader(es_url, state=state)
     postgres_loader = PostgresLoader(pg_conn, state=state)
 
-    raw_data = postgres_loader.load_movies()
-    elastic_prepared_data = postgres_loader.transform_data(raw_data)
-    elastic_loader.load_to_es(elastic_prepared_data)
+    elastic_coro = elastic_loader.load_to_es()
+    elastic_prepared_data = postgres_loader.transform_data(elastic_coro)
+    postgres_loader.load_movies(elastic_prepared_data)
 
 
 if __name__ == "__main__":
@@ -34,4 +34,4 @@ if __name__ == "__main__":
         "port": os.getenv("DB_PORT"),
     }
     with psycopg2.connect(**dsl, cursor_factory=DictCursor) as pg_conn:
-        etl_process(pg_conn, BASE_ES_URL, redis_client=redis)
+        pipeline(pg_conn, BASE_ES_URL, redis_client=redis)

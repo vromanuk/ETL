@@ -1,5 +1,7 @@
 import json
 import logging
+from typing import Generator
+
 from dataclasses import asdict
 from urllib.parse import urljoin
 
@@ -10,6 +12,7 @@ from psycopg2.extensions import connection as _connection
 from pydantic.dataclasses import dataclass
 
 from etl_state import State
+from postgres_to_es.utils import coroutine
 
 logging.basicConfig(format="[%(asctime)s: %(levelname)s] %(message)s", level=logging.INFO)
 
@@ -49,29 +52,32 @@ class ESLoader:
         max_tries=3,
         jitter=backoff.random_jitter,
     )
-    def load_to_es(self, records: list[ESItem], index_name: str = "movies"):
+    @coroutine
+    def load_to_es(self, index_name: str = "movies"):
         """
         Отправка запроса в ES и разбор ошибок сохранения данных
         """
         data = self.state.retrieve_state()
         prepared_query = data.get("prepared_query")
-        if not prepared_query:
-            prepared_query = self._get_es_bulk_query(records, index_name)
-            self.state.set_state({"prepared_query": prepared_query})
-        str_query = "\n".join(prepared_query) + "\n"
+        try:
+            records = (yield)
+            if not prepared_query:
+                prepared_query = self._get_es_bulk_query(records, index_name)
+                self.state.set_state("prepared_query", prepared_query)
+            str_query = "\n".join(prepared_query) + "\n"
 
-        logging.info("loading movies to elastic")
-        response = requests.post(
-            urljoin(self.url, "_bulk"), data=str_query, headers={"Content-Type": "application/x-ndjson"}
-        )
+            logging.info("loading movies to elastic")
+            response = requests.post(
+                urljoin(self.url, "_bulk"), data=str_query, headers={"Content-Type": "application/x-ndjson"}
+            )
 
-        json_response = json.loads(response.content.decode())
-        for item in json_response["items"]:
-            error_message = item["index"].get("error")
-            if error_message:
-                logging.error(error_message)
-
-        self.state.clean_up()
+            json_response = json.loads(response.content.decode())
+            for item in json_response["items"]:
+                error_message = item["index"].get("error")
+                if error_message:
+                    logging.error(error_message)
+        except GeneratorExit:
+            self.state.clean_up()
 
 
 class PostgresLoader:
@@ -82,14 +88,14 @@ class PostgresLoader:
         self.state = state
 
     @backoff.on_exception(backoff.expo, OperationalError, max_tries=3, jitter=backoff.random_jitter)
-    def load_movies(self) -> dict:
+    def load_movies(self, coro):
         """
         Основной метод для ETL.
         """
         with self.conn.cursor() as cur:
             records = self.state.retrieve_state()
             if records:
-                return records
+                coro.send(records)
             logging.info("loading cast")
             cur.execute(
                 f"""
@@ -151,24 +157,28 @@ class PostgresLoader:
             records = cur.fetchall()
 
         self.state.set_state("records", records)
-        return records
+        coro.send(records)
 
     @staticmethod
-    def transform_data(raw_data: dict) -> list[ESItem]:
+    @coroutine
+    def transform_data(coro):
         logging.info("transforming film_works to load into elastic")
         records = []
-        for film_work in raw_data:
-            title, description, imdb_rating, uuid, genres, actors, directors, writers = film_work
-            es_item = ESItem(
-                id=uuid,
-                title=title,
-                description=description,
-                imdb_rating=imdb_rating,
-                actors=actors or [],
-                writers=writers or [],
-                directors=directors or [],
-                genres=genres or [],
-            )
-            records.append(es_item)
-
-        return records
+        try:
+            raw_data = (yield)
+            for film_work in raw_data:
+                title, description, imdb_rating, uuid, genres, actors, directors, writers = film_work
+                es_item = ESItem(
+                    id=uuid,
+                    title=title,
+                    description=description,
+                    imdb_rating=imdb_rating,
+                    actors=actors or [],
+                    writers=writers or [],
+                    directors=directors or [],
+                    genres=genres or [],
+                )
+                records.append(es_item)
+            coro.send(records)
+        except GeneratorExit:
+            coro.close()
