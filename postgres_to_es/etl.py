@@ -29,7 +29,7 @@ class ESItem:
     description: str
 
 
-class ESLoader:
+class ESSaver:
     def __init__(self, url: str, state: State):
         self.url = url
         self.state = state
@@ -106,7 +106,8 @@ class PostgresLoader:
                     LIMIT {self.BATCH_LIMIT};
                 """
             )
-            cast_ids = cur.fetchall()
+            raw_cast_ids = cur.fetchall()
+            cast_ids = [uuid["uuid"] for uuid in raw_cast_ids]
 
             logging.info("loading film_work_ids")
             cur.execute(
@@ -120,7 +121,8 @@ class PostgresLoader:
                 """,
                 {"cast_ids": cast_ids or []},
             )
-            film_work_ids = cur.fetchall()
+            raw_film_work_ids = cur.fetchall()
+            film_work_ids = [id_["id"] for id_ in raw_film_work_ids]
 
             logging.info("loading film_works")
             cur.execute(
@@ -167,16 +169,15 @@ class PostgresLoader:
         try:
             raw_data = (yield)
             for film_work in raw_data:
-                title, description, imdb_rating, uuid, genres, actors, directors, writers = film_work
                 es_item = ESItem(
-                    id=uuid,
-                    title=title,
-                    description=description,
-                    imdb_rating=imdb_rating,
-                    actors=actors or [],
-                    writers=writers or [],
-                    directors=directors or [],
-                    genres=genres or [],
+                    id=film_work["id"],
+                    title=film_work["title"],
+                    description=film_work["description"],
+                    imdb_rating=film_work["rating"],
+                    actors=film_work["actors"] or [],
+                    writers=film_work["writers"] or [],
+                    directors=film_work["directors"] or [],
+                    genres=film_work["genres"] or [],
                 )
                 records.append(es_item)
             coro.send(records)
