@@ -1,31 +1,19 @@
-import datetime
 import json
 import logging
 from dataclasses import asdict
+from datetime import datetime
 from urllib.parse import urljoin
 
 import backoff
 import requests
 from psycopg2 import OperationalError
 from psycopg2.extensions import connection as _connection
-from pydantic.dataclasses import dataclass
 
 from etl_state import State
+from postgres_to_es.entities import ESItem
 from postgres_to_es.utils import coroutine
 
 logging.basicConfig(format="[%(asctime)s: %(levelname)s] %(message)s", level=logging.INFO)
-
-
-@dataclass
-class ESItem:
-    id: str
-    genres: list[str]
-    writers: list[str]
-    actors: list[str]
-    imdb_rating: float
-    title: str
-    directors: list[str]
-    description: str
 
 
 class ESSaver:
@@ -91,7 +79,7 @@ class PostgresLoader:
         Основной метод для ETL.
         """
         with self.conn.cursor() as cur:
-            modified = datetime.datetime.fromisoformat(self.state.get_state("modified"))
+            modified = datetime.fromisoformat(self.state.get_state("modified"))
             if not modified:
                 logging.info("fetching min modified field")
                 cur.execute(
@@ -100,7 +88,7 @@ class PostgresLoader:
                         FROM "movies_person"
                     """
                 )
-                min_modified = cur.fetchone()["min_modified"]
+                modified = cur.fetchone()["min_modified"]
             logging.info("loading cast")
             cur.execute(
                 f"""
@@ -110,7 +98,7 @@ class PostgresLoader:
                     ORDER BY "movies_person"."modified"
                     LIMIT {self.BATCH_LIMIT};
                 """,
-                {"modified": modified or min_modified},
+                {"modified": modified},
             )
             raw_cast_ids = cur.fetchall()
             cast_ids = [uuid["uuid"] for uuid in raw_cast_ids]
@@ -118,14 +106,14 @@ class PostgresLoader:
             logging.info("loading film_work_ids")
             cur.execute(
                 f"""
-                SELECT fw.id
+                SELECT DISTINCT fw.id
                     FROM movies_filmwork fw
                     LEFT JOIN movies_cast pfw ON pfw.film_work_id = fw.id
-                    WHERE fw.modified >= %(modified)s AND pfw.person_id::text = ANY(%(cast_ids)s)
+                    WHERE fw.modified >= %(modified)s OR pfw.person_id::text = ANY(%(cast_ids)s)
                     ORDER BY fw.modified
                     LIMIT {self.BATCH_LIMIT};
                 """,
-                {"cast_ids": cast_ids or [], "modified": modified or min_modified},
+                {"cast_ids": cast_ids or [], "modified": modified},
             )
             raw_film_work_ids = cur.fetchall()
             film_work_ids = [id_["id"] for id_ in raw_film_work_ids]
