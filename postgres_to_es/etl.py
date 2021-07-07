@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Generator
+import datetime
 
 from dataclasses import asdict
 from urllib.parse import urljoin
@@ -57,8 +57,7 @@ class ESSaver:
         """
         Отправка запроса в ES и разбор ошибок сохранения данных
         """
-        data = self.state.retrieve_state()
-        prepared_query = data.get("prepared_query")
+        prepared_query = self.state.get_state("prepared_query")
         try:
             records = (yield)
             if not prepared_query:
@@ -93,18 +92,25 @@ class PostgresLoader:
         Основной метод для ETL.
         """
         with self.conn.cursor() as cur:
-            records = self.state.retrieve_state()
-            if records:
-                coro.send(records)
+            modified = datetime.datetime.fromisoformat(self.state.get_state("modified"))
+            if not modified:
+                cur.execute(
+                    f"""
+                        SELECT MIN("movies_person"."modified") AS min_modified
+                        FROM "movies_person"
+                    """
+                )
+                min_modified = cur.fetchone()["min_modified"]
             logging.info("loading cast")
             cur.execute(
                 f"""
                     SELECT "movies_person"."uuid"
                     FROM "movies_person"
-                    WHERE "movies_person"."modified" < CURRENT_DATE
+                    WHERE "movies_person"."modified" >= %(modified)s
                     ORDER BY "movies_person"."modified"
                     LIMIT {self.BATCH_LIMIT};
-                """
+                """,
+                {"modified": modified or min_modified}
             )
             raw_cast_ids = cur.fetchall()
             cast_ids = [uuid["uuid"] for uuid in raw_cast_ids]
@@ -115,11 +121,11 @@ class PostgresLoader:
                 SELECT fw.id
                     FROM movies_filmwork fw
                     LEFT JOIN movies_cast pfw ON pfw.film_work_id = fw.id
-                    WHERE fw.modified < CURRENT_TIMESTAMP AND pfw.person_id::text = ANY(%(cast_ids)s)
+                    WHERE fw.modified >= %(modified)s AND pfw.person_id::text = ANY(%(cast_ids)s)
                     ORDER BY fw.modified
                     LIMIT {self.BATCH_LIMIT};
                 """,
-                {"cast_ids": cast_ids or []},
+                {"cast_ids": cast_ids or [], "modified": modified or min_modified},
             )
             raw_film_work_ids = cur.fetchall()
             film_work_ids = [id_["id"] for id_ in raw_film_work_ids]
@@ -131,6 +137,7 @@ class PostgresLoader:
                     "movies_filmwork"."title",
                     "movies_filmwork"."description",
                     "movies_filmwork"."rating",
+                    "movies_filmwork"."modified",
                     "movies_filmwork"."uuid" AS "id",
                 ARRAY_AGG("movies_genre"."genre" ) AS "genres",
                 ARRAY_AGG(CONCAT("movies_person"."first_name", ' ', "movies_person"."last_name") )
@@ -151,14 +158,14 @@ class PostgresLoader:
                 LEFT OUTER JOIN "movies_role" ON ("movies_cast"."role_id" = "movies_role"."id")
                 WHERE "movies_filmwork"."id" = ANY(%(film_work_ids)s)
                 GROUP BY "movies_filmwork"."title", "movies_filmwork"."description", "movies_filmwork"."creation_date",
-                "movies_filmwork"."rating", "movies_filmwork"."type", "movies_filmwork"."uuid"
-                ORDER BY "movies_filmwork"."rating" DESC;
+                "movies_filmwork"."rating", "movies_filmwork"."modified", "movies_filmwork"."uuid"
+                ORDER BY "movies_filmwork"."modified" DESC;
             """,
                 {"film_work_ids": film_work_ids or []},
             )
             records = cur.fetchall()
 
-        self.state.set_state("records", records)
+        self.state.set_state("modified", modified or records[0]["modified"].isoformat())
         coro.send(records)
 
     @staticmethod
