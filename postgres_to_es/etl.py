@@ -1,7 +1,6 @@
+import datetime
 import json
 import logging
-import datetime
-
 from dataclasses import asdict
 from urllib.parse import urljoin
 
@@ -59,7 +58,7 @@ class ESSaver:
         """
         prepared_query = self.state.get_state("prepared_query")
         try:
-            records = (yield)
+            records = yield
             if not prepared_query:
                 prepared_query = self._get_es_bulk_query(records, index_name)
                 self.state.set_state("prepared_query", prepared_query)
@@ -94,8 +93,9 @@ class PostgresLoader:
         with self.conn.cursor() as cur:
             modified = datetime.datetime.fromisoformat(self.state.get_state("modified"))
             if not modified:
+                logging.info("fetching min modified field")
                 cur.execute(
-                    f"""
+                    """
                         SELECT MIN("movies_person"."modified") AS min_modified
                         FROM "movies_person"
                     """
@@ -110,7 +110,7 @@ class PostgresLoader:
                     ORDER BY "movies_person"."modified"
                     LIMIT {self.BATCH_LIMIT};
                 """,
-                {"modified": modified or min_modified}
+                {"modified": modified or min_modified},
             )
             raw_cast_ids = cur.fetchall()
             cast_ids = [uuid["uuid"] for uuid in raw_cast_ids]
@@ -174,7 +174,7 @@ class PostgresLoader:
         logging.info("transforming film_works to load into elastic")
         records = []
         try:
-            raw_data = (yield)
+            raw_data = yield
             for film_work in raw_data:
                 es_item = ESItem(
                     id=film_work["id"],
