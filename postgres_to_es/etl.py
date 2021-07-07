@@ -79,7 +79,7 @@ class PostgresLoader:
         Основной метод для ETL.
         """
         with self.conn.cursor() as cur:
-            modified = datetime.fromisoformat(self.state.get_state("modified"))
+            modified = self.state.get_state("modified")
             if not modified:
                 logging.info("fetching min modified field")
                 cur.execute(
@@ -89,6 +89,8 @@ class PostgresLoader:
                     """
                 )
                 modified = cur.fetchone()["min_modified"]
+            else:
+                modified = datetime.fromisoformat(modified)
             logging.info("loading cast")
             cur.execute(
                 f"""
@@ -106,7 +108,7 @@ class PostgresLoader:
             logging.info("loading film_work_ids")
             cur.execute(
                 f"""
-                SELECT DISTINCT fw.id
+                SELECT DISTINCT fw.id, fw.modified
                     FROM movies_filmwork fw
                     LEFT JOIN movies_cast pfw ON pfw.film_work_id = fw.id
                     WHERE fw.modified >= %(modified)s OR pfw.person_id::text = ANY(%(cast_ids)s)
@@ -153,7 +155,7 @@ class PostgresLoader:
             )
             records = cur.fetchall()
 
-        self.state.set_state("modified", modified or records[0]["modified"].isoformat())
+        self.state.set_state("modified", modified.isoformat() or records[0]["modified"].isoformat())
         coro.send(records)
 
     @staticmethod
