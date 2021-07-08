@@ -8,6 +8,7 @@ class ESItem:
     writers: list[str]
     actors: list[str]
     imdb_rating: float
+    modified: str
     title: str
     directors: list[str]
     description: str

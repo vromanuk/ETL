@@ -44,24 +44,23 @@ class ESSaver:
         """
         Отправка запроса в ES и разбор ошибок сохранения данных
         """
-        prepared_query = self.state.get_state("prepared_query")
         try:
-            records = yield
-            if not prepared_query:
+            while records := (yield):
                 prepared_query = self._get_es_bulk_query(records, index_name)
                 self.state.set_state("prepared_query", prepared_query)
-            str_query = "\n".join(prepared_query) + "\n"
+                str_query = "\n".join(prepared_query) + "\n"
 
-            logging.info("loading movies to elastic")
-            response = requests.post(
-                urljoin(self.url, "_bulk"), data=str_query, headers={"Content-Type": "application/x-ndjson"}
-            )
+                logging.info("loading movies to elastic")
+                response = requests.post(
+                    urljoin(self.url, "_bulk"), data=str_query, headers={"Content-Type": "application/x-ndjson"}
+                )
+                self.state.set_state("modified", records[0].modified)
 
-            json_response = json.loads(response.content.decode())
-            for item in json_response["items"]:
-                error_message = item["index"].get("error")
-                if error_message:
-                    logging.error(error_message)
+                json_response = json.loads(response.content.decode())
+                for item in json_response["items"]:
+                    error_message = item["index"].get("error")
+                    if error_message:
+                        logging.error(error_message)
         except GeneratorExit:
             self.state.clean_up()
 
@@ -93,12 +92,11 @@ class PostgresLoader:
                 modified = datetime.fromisoformat(modified)
             logging.info("loading cast")
             cur.execute(
-                f"""
+                """
                     SELECT "movies_person"."uuid"
                     FROM "movies_person"
                     WHERE "movies_person"."modified" >= %(modified)s
-                    ORDER BY "movies_person"."modified"
-                    LIMIT {self.BATCH_LIMIT};
+                    ORDER BY "movies_person"."modified";
                 """,
                 {"modified": modified},
             )
@@ -107,13 +105,12 @@ class PostgresLoader:
 
             logging.info("loading film_work_ids")
             cur.execute(
-                f"""
+                """
                 SELECT DISTINCT fw.id, fw.modified
                     FROM movies_filmwork fw
                     LEFT JOIN movies_cast pfw ON pfw.film_work_id = fw.id
                     WHERE fw.modified >= %(modified)s OR pfw.person_id::text = ANY(%(cast_ids)s)
-                    ORDER BY fw.modified
-                    LIMIT {self.BATCH_LIMIT};
+                    ORDER BY fw.modified;
                 """,
                 {"cast_ids": cast_ids or [], "modified": modified},
             )
@@ -153,30 +150,31 @@ class PostgresLoader:
             """,
                 {"film_work_ids": film_work_ids or []},
             )
-            records = cur.fetchall()
-
-        self.state.set_state("modified", modified.isoformat() or records[0]["modified"].isoformat())
-        coro.send(records)
+            while rows := cur.fetchmany(self.BATCH_LIMIT):
+                if not rows:
+                    coro.close()
+                coro.send(rows)
 
     @staticmethod
     @coroutine
     def transform_data(coro):
         logging.info("transforming film_works to load into elastic")
-        records = []
         try:
-            raw_data = yield
-            for film_work in raw_data:
-                es_item = ESItem(
-                    id=film_work["id"],
-                    title=film_work["title"],
-                    description=film_work["description"],
-                    imdb_rating=film_work["rating"],
-                    actors=film_work["actors"] or [],
-                    writers=film_work["writers"] or [],
-                    directors=film_work["directors"] or [],
-                    genres=film_work["genres"] or [],
-                )
-                records.append(es_item)
-            coro.send(records)
+            while raw_data := (yield):
+                records = []
+                for film_work in raw_data:
+                    es_item = ESItem(
+                        id=film_work["id"],
+                        title=film_work["title"],
+                        description=film_work["description"],
+                        imdb_rating=film_work["rating"],
+                        modified=film_work["modified"].isoformat(),
+                        actors=film_work["actors"] or [],
+                        writers=film_work["writers"] or [],
+                        directors=film_work["directors"] or [],
+                        genres=film_work["genres"] or [],
+                    )
+                    records.append(es_item)
+                coro.send(records)
         except GeneratorExit:
             coro.close()
