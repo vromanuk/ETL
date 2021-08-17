@@ -24,6 +24,14 @@ def pipeline(pg_conn: _connection, es_url: str, redis_client: Redis):
     elastic_prepared_data = postgres_loader.transform_data(elastic_coro)
     postgres_loader.load_movies(elastic_prepared_data)
 
+    elastic_coro = elastic_saver.load_to_es(index_name="genres")
+    elastic_prepared_data = postgres_loader.transform_genres(elastic_coro)
+    postgres_loader.load_genres(elastic_prepared_data)
+
+    elastic_coro = elastic_saver.load_to_es(index_name="people")
+    elastic_prepared_data = postgres_loader.transform_data(elastic_coro)
+    postgres_loader.load_people(elastic_prepared_data)
+
 
 if __name__ == "__main__":
     dsl = {

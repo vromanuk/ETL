@@ -10,7 +10,7 @@ from psycopg2 import OperationalError
 from psycopg2.extensions import connection as _connection
 
 from etl_state import State
-from postgres_to_es.entities import ESItem
+from postgres_to_es.entities import ESGenreItem, ESItem, ESPersonItem
 from postgres_to_es.utils import coroutine
 
 logging.basicConfig(format="[%(asctime)s: %(levelname)s] %(message)s", level=logging.INFO)
@@ -155,6 +155,72 @@ class PostgresLoader:
                     coro.close()
                 coro.send(rows)
 
+    @backoff.on_exception(backoff.expo, OperationalError, max_tries=3, jitter=backoff.random_jitter)
+    def load_genres(self, coro):
+        """
+        Основной метод для ETL загрузки жанров.
+        """
+        with self.conn.cursor() as cur:
+            modified = self.state.get_state("modified")
+            if not modified:
+                logging.info("fetching min modified field")
+                cur.execute(
+                    """
+                        SELECT MIN("movies_genre"."modified") AS min_modified
+                        FROM "movies_genre"
+                    """
+                )
+                modified = cur.fetchone()["min_modified"]
+            else:
+                modified = datetime.fromisoformat(modified)
+            logging.info("loading genres")
+            cur.execute(
+                """
+                    SELECT id, created, modified, genre from movies_genre
+                    WHERE modified >= %(modified)s;
+                    ORDER BY modified;
+                """,
+                {"modified": modified},
+            )
+
+            while rows := cur.fetchmany(self.BATCH_LIMIT):
+                if not rows:
+                    coro.close()
+                coro.send(rows)
+
+    @backoff.on_exception(backoff.expo, OperationalError, max_tries=3, jitter=backoff.random_jitter)
+    def load_people(self, coro):
+        """
+        Основной метод для ETL загрузка актеров, сценаристов и режиссёров.
+        """
+        with self.conn.cursor() as cur:
+            modified = self.state.get_state("modified")
+            if not modified:
+                logging.info("fetching min modified field")
+                cur.execute(
+                    """
+                        SELECT MIN("movies_person"."modified") AS min_modified
+                        FROM "movies_person"
+                    """
+                )
+                modified = cur.fetchone()["min_modified"]
+            else:
+                modified = datetime.fromisoformat(modified)
+            logging.info("loading people")
+            cur.execute(
+                """
+                    SELECT id, created, modified, genre from movies_genre
+                    WHERE modified >= %(modified)s;
+                    ORDER BY modified;
+                """,
+                {"modified": modified},
+            )
+
+            while rows := cur.fetchmany(self.BATCH_LIMIT):
+                if not rows:
+                    coro.close()
+                coro.send(rows)
+
     @staticmethod
     @coroutine
     def transform_data(coro):
@@ -173,6 +239,46 @@ class PostgresLoader:
                         writers=film_work["writers"] or [],
                         directors=film_work["directors"] or [],
                         genres=film_work["genres"] or [],
+                    )
+                    records.append(es_item)
+                coro.send(records)
+        except GeneratorExit:
+            coro.close()
+
+    @staticmethod
+    @coroutine
+    def transform_genres(coro):
+        logging.info("transforming genres to load into elastic")
+        try:
+            while raw_data := (yield):
+                records = []
+                for genre in raw_data:
+                    es_item = ESGenreItem(
+                        id=genre["id"],
+                        modified=genre["modified"],
+                        created=genre["created"],
+                        genre=genre["genre"],
+                    )
+                    records.append(es_item)
+                coro.send(records)
+        except GeneratorExit:
+            coro.close()
+
+    @staticmethod
+    @coroutine
+    def transform_people(coro):
+        logging.info("transforming people to load into elastic")
+        try:
+            while raw_data := (yield):
+                records = []
+                for person in raw_data:
+                    es_item = ESPersonItem(
+                        id=person["uuid"],
+                        modified=person["modified"],
+                        created=person["created"],
+                        birth_date=person["genre"],
+                        first_name=person["first_name"],
+                        last_name=person["last_name"],
                     )
                     records.append(es_item)
                 coro.send(records)
